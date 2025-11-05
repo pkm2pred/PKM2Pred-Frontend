@@ -75,7 +75,10 @@ export default function Home() {
   const [activatorAC50Data, setActivatorAC50Data] = useState([]);
   const [particles, setParticles] = useState([]);
   const [pageViews, setPageViews] = useState(null); // State for the view counter
-
+  const [userEmail, setUserEmail] = useState('');
+  const [showEmailPrompt, setShowEmailPrompt] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+  const [isEmailSubmission, setIsEmailSubmission] = useState(false);
 
   const [isScrolled, setIsScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -277,7 +280,7 @@ export default function Home() {
   };
 
   const handleSubmit = async () => {
-    setIsLoading(true); setResults(null); setInputError('');
+    setIsLoading(true); setResults(null); setInputError(''); setEmailSent(false); setIsEmailSubmission(false);
     let smilesToProcess = [];
 
     if (selectedFile) {
@@ -300,24 +303,70 @@ export default function Home() {
       setInputError("No SMILES input. Enter in textarea or upload file.");
       setIsLoading(false); return;
     }
-    if (smilesToProcess.length > MAX_COMPOUNDS) {
-      setInputError(`Max ${MAX_COMPOUNDS} compounds allowed. You provided ${smilesToProcess.length}.`);
+    
+    // Check if manual input exceeds 20 molecules
+    if (!selectedFile && smilesToProcess.length > MAX_COMPOUNDS) {
+      setInputError(`Manual input is limited to ${MAX_COMPOUNDS} compounds. You provided ${smilesToProcess.length}. Please upload a CSV file for larger batches.`);
       setIsLoading(false); return;
     }
+    
+    // Check if file input exceeds 20 molecules - show email prompt
+    if (selectedFile && smilesToProcess.length > MAX_COMPOUNDS) {
+      if (!userEmail || !userEmail.includes('@')) {
+        setShowEmailPrompt(true);
+        setInputError(`Your file contains ${smilesToProcess.length} compounds (more than ${MAX_COMPOUNDS}). Please enter your email address to receive the results.`);
+        setIsLoading(false);
+        return;
+      }
+      // Set flag to indicate this is an email submission
+      setIsEmailSubmission(true);
+    }
+
+    // Check if large batch and email is required
+    const isLargeBatch = smilesToProcess.length > MAX_COMPOUNDS;
 
     try {
-      const payload = { compound: smilesToProcess, percentage: Number(percentage) };
+      const payload = { 
+        compound: smilesToProcess, 
+        percentage: Number(percentage),
+        email: (selectedFile && smilesToProcess.length > MAX_COMPOUNDS) ? userEmail : undefined
+      };
+      
       const res = await fetch(API_URL, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       const data = await res.json();
-      if (!res.ok) setResults({ error: data.error || `Server Error: ${res.status}` });
-      else setResults(data);
+      
+      if (!res.ok) {
+        setResults({ error: data.error || `Server Error: ${res.status}` });
+        setIsLoading(false);
+        setIsEmailSubmission(false);
+      } else {
+        // Check if email was sent for large batch
+        if (data.email_sent) {
+          // Update results to show completion
+          setResults({ 
+            email_sent: true, 
+            message: 'Processing completed successfully! Results will be sent to your email shortly.',
+            completionMessage: 'Check your inbox for the detailed results CSV file.',
+            compound_count: data.compound_count,
+            recipient_email: data.recipient_email,
+            isProcessing: false
+          });
+          setEmailSent(true);
+          setIsLoading(false);
+          setIsEmailSubmission(false);
+        } else {
+          setResults(data);
+          setIsLoading(false);
+          setIsEmailSubmission(false);
+        }
+      }
     } catch (err) {
       setResults({ error: `Network/Parsing Error: ${err.message}` });
-    } finally {
       setIsLoading(false);
+      setIsEmailSubmission(false);
     }
   };
 
@@ -341,14 +390,27 @@ export default function Home() {
   const handleExportCSV = () => {
     if (!tableData.length) return;
 
-    const headers = ["Compound (SMILES)", "Modulator Type", "AC50 Range"];
+    const descriptorHeaders = [
+      'nN', 'nX', 'AATS2i', 'nBondsD', 'nBondsD2', 'C1SP2', 'C3SP2', 'SCH-5',
+      'nHssNH', 'ndssC', 'nssNH', 'SdssC', 'SdS', 'mindO', 'mindS', 'minssS',
+      'maxdssC', 'ETA_dAlpha_B', 'MDEN-23', 'n5Ring', 'nT5Ring', 'nHeteroRing',
+      'n5HeteroRing', 'nT5HeteroRing', 'SRW5', 'SRW7', 'SRW9', 'WTPT-5'
+    ];
+    
+    const headers = ["Compound (SMILES)", "Modulator Type", "AC50 Range", ...descriptorHeaders];
     const csvRows = [
       headers.join(','),
-      ...tableData.map(item => [
-        escapeCSVField(item.smiles),
-        escapeCSVField(item.type),
-        escapeCSVField(item.AC50)
-      ].join(','))
+      ...tableData.map(item => {
+        const descriptorValues = descriptorHeaders.map(header => 
+          escapeCSVField(item.descriptors?.[header] || '0.0000')
+        );
+        return [
+          escapeCSVField(item.smiles),
+          escapeCSVField(item.type),
+          escapeCSVField(item.AC50),
+          ...descriptorValues
+        ].join(',');
+      })
     ];
     const csvString = csvRows.join('\n');
     const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
@@ -510,6 +572,27 @@ export default function Home() {
               </motion.div>
             )}
 
+            {showEmailPrompt && (
+              <motion.div 
+                initial={{ opacity: 0, y: -10 }} 
+                animate={{ opacity: 1, y: 0 }} 
+                className="mb-6"
+              >
+                <label htmlFor="emailInput" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Email Address (for large batch results)
+                </label>
+                <input
+                  id="emailInput"
+                  type="email"
+                  placeholder="your.email@example.com"
+                  value={userEmail}
+                  onChange={(e) => setUserEmail(e.target.value)}
+                  disabled={isLoading}
+                  className="w-full p-3 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-cyan-500 focus:border-cyan-500 bg-gray-50 dark:bg-gray-700 text-sm placeholder-gray-400 dark:placeholder-gray-500"
+                />
+              </motion.div>
+            )}
+
             <div className="mb-6">
               <label htmlFor="percentageSlider" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Confidence Interval ({percentage}%)
@@ -527,41 +610,75 @@ export default function Home() {
                 className={`w-full sm:w-auto flex-grow py-3 px-6 rounded-md font-semibold text-base transition-all duration-300 ease-in-out
                             text-white disabled:opacity-50 disabled:cursor-not-allowed
                             ${isLoading
-                    ? 'bg-cyan-500 dark:bg-cyan-600 animate-pulse'
+                    ? 'bg-gray-400 dark:bg-gray-600 cursor-not-allowed'
                     : 'bg-cyan-600 dark:bg-cyan-500 hover:bg-cyan-700 dark:hover:bg-cyan-400'
                   }
                             focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 focus:ring-cyan-500`}
                 whileHover={{ scale: isLoading ? 1 : 1.03 }}
                 whileTap={{ scale: isLoading ? 1 : 0.97 }}
-                animate={isLoading ? {
-                  boxShadow: ["0 0 0px 0px rgba(6,182,212,0.0)", "0 0 8px 2px rgba(6,182,212,0.7)", "0 0 0px 0px rgba(6,182,212,0.0)"],
-                } : {}}
-                transition={isLoading ? { duration: 1.5, repeat: Infinity, ease: "linear" } : { duration: 0.15 }}
               >
                 {isLoading ? (
                   <div className="flex items-center justify-center">
                     <div className="w-5 h-5 border-2 border-white/50 border-t-white rounded-full animate-spin mr-2" />
-                    Analyzing...
+                    {isEmailSubmission ? 'Processing & Sending...' : 'Analyzing...'}
                   </div>
                 ) : 'Predict'}
               </motion.button>
               <button onClick={clearInputs} disabled={isLoading}
-                className="w-full sm:w-auto py-3 px-6 rounded-md font-semibold text-sm bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50">
+                className="w-full sm:w-auto py-3 px-6 rounded-md font-semibold text-sm bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                 Clear All
               </button>
             </div>
           </motion.div>
 
           <AnimatePresence>
-            {isLoading && !results && (
+            {isLoading && !emailSent && (
               <motion.div
                 key="loadingResults"
                 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-                className="mt-8 text-center text-gray-500 dark:text-gray-400">
-                Fetching results, please wait...
+                className={`mt-8 p-6 rounded-lg border-2 ${
+                  isEmailSubmission 
+                    ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700' 
+                    : 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-700'
+                }`}>
+                <div className="flex items-center justify-center mb-3">
+                  <div className={`w-8 h-8 border-3 rounded-full animate-spin mr-3 ${
+                    isEmailSubmission 
+                      ? 'border-amber-500/30 border-t-amber-500' 
+                      : 'border-blue-500/30 border-t-blue-500'
+                  }`} />
+                  <h3 className={`text-lg font-semibold ${
+                    isEmailSubmission 
+                      ? 'text-amber-700 dark:text-amber-300' 
+                      : 'text-blue-700 dark:text-blue-300'
+                  }`}>
+                    {isEmailSubmission ? 'Processing Your Compounds...' : 'Analyzing Compounds...'}
+                  </h3>
+                </div>
+                <p className={`text-center text-sm mb-2 ${
+                  isEmailSubmission 
+                    ? 'text-amber-700 dark:text-amber-400' 
+                    : 'text-blue-600 dark:text-blue-400'
+                }`}>
+                  {isEmailSubmission 
+                    ? 'Your compounds are being processed. This may take a few moments...'
+                    : 'Please wait while we analyze your compounds...'}
+                </p>
+                {isEmailSubmission && (
+                  <div className="mt-3 p-3 bg-white dark:bg-gray-800 rounded-md border border-amber-200 dark:border-amber-700">
+                    <div className="flex items-start">
+                      <svg className="w-5 h-5 text-amber-500 mt-0.5 mr-2 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                      </svg>
+                      <p className="text-sm text-amber-800 dark:text-amber-300">
+                        Results will be sent to <span className="font-semibold">{userEmail}</span> upon completion.
+                      </p>
+                    </div>
+                  </div>
+                )}
               </motion.div>
             )}
-            {results && (
+            {results && !isLoading && (
               <motion.div
                 key="resultsContent"
                 initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
@@ -574,7 +691,62 @@ export default function Home() {
                   </div>
                 )}
 
-                {tableData.length > 0 && !results.error && (
+                {results.email_sent && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }} 
+                    animate={{ opacity: 1, scale: 1 }} 
+                    transition={{ duration: 0.3 }}
+                    className="p-6 bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 border-2 border-green-300 dark:border-green-700 rounded-lg shadow-lg"
+                  >
+                    <div className="flex items-start">
+                      <div className="flex-shrink-0">
+                        <svg className="w-12 h-12 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </div>
+                      <div className="ml-4 flex-1">
+                        <h3 className="text-2xl font-bold text-green-800 dark:text-green-300 mb-2">
+                          ✓ Processing Complete!
+                        </h3>
+                        <div className="space-y-2">
+                          <p className="text-base text-green-700 dark:text-green-400 mb-3">
+                            <strong>Status:</strong> {results.message}
+                          </p>
+                          <div className="rounded-md p-4 border bg-white dark:bg-gray-800 border-green-200 dark:border-green-700">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                              <div>
+                                <span className="font-semibold text-gray-700 dark:text-gray-300">Compounds:</span>
+                                <span className="ml-2 text-gray-600 dark:text-gray-400">{results.compound_count}</span>
+                              </div>
+                              <div>
+                                <span className="font-semibold text-gray-700 dark:text-gray-300">Email:</span>
+                                <span className="ml-2 text-gray-600 dark:text-gray-400">{results.recipient_email}</span>
+                              </div>
+                            </div>
+                          </div>
+                          {results.completionMessage && (
+                            <p className="text-sm text-green-700 dark:text-green-400 mt-2">
+                              <strong>Next Step:</strong> {results.completionMessage}
+                            </p>
+                          )}
+                          <div className="mt-3 p-3 rounded bg-green-100 dark:bg-green-900/30">
+                            <p className="font-medium text-sm text-green-800 dark:text-green-300">
+                              What happens next?
+                            </p>
+                            <ul className="mt-1 text-xs list-disc list-inside space-y-1 text-green-700 dark:text-green-400">
+                              <li>Processing has been completed successfully</li>
+                              <li>Results email will be sent shortly to {results.recipient_email}</li>
+                              <li>You can safely close this page</li>
+                              <li>Check your email for the CSV file with detailed results</li>
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+
+                {tableData.length > 0 && !results.error && !results.email_sent && (
                   <div className="mb-8">
                     <h3 className="text-xl sm:text-2xl font-semibold text-gray-800 dark:text-gray-100 mb-4">Results Summary</h3>
                     <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
@@ -668,7 +840,7 @@ export default function Home() {
                   </div>
                 )}
 
-                {(chartData.length > 0 || activatorAC50Data.length > 0) && !results.error && (
+                {(chartData.length > 0 || activatorAC50Data.length > 0) && !results.error && !results.email_sent && (
                   <div className="grid md:grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
                     {chartData.length > 0 && (
                       <div>
@@ -790,11 +962,11 @@ export default function Home() {
                   </div>
                 )}
 
-                {tableData.length === 0 && chartData.length === 0 && activatorAC50Data.length === 0 && !results.error && !isLoading && (
+                {tableData.length === 0 && chartData.length === 0 && activatorAC50Data.length === 0 && !results.error && !results.email_sent && !isLoading && (
                   <p className="text-center text-gray-500 dark:text-gray-400 py-4">No results to display. Submit SMILES for analysis.</p>
                 )}
 
-                {tableData.length > 0 && !results.error && (
+                {tableData.length > 0 && !results.error && !results.email_sent && (
                   <div className="mt-8 text-center sm:text-right">
                     <button
                       onClick={handleExportCSV}
