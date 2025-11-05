@@ -10,8 +10,8 @@ import {
 
 // --- Configuration ---
 const MAX_COMPOUNDS = 20;
-const API_BASE_URL = 'https://honest-tuna-striking.ngrok-free.app/api';
-// const API_BASE_URL = 'http://127.0.0.1:5000/api';
+// const API_BASE_URL = 'https://honest-tuna-striking.ngrok-free.app/api';
+const API_BASE_URL = 'http://127.0.0.1:5000/api';
 const API_URL = `${API_BASE_URL}/predict`;
 const CHECK_USER_URL = `${API_BASE_URL}/check-user`;
 const REGISTER_USER_URL = `${API_BASE_URL}/register-user`;
@@ -83,6 +83,9 @@ export default function Home() {
   const [emailSent, setEmailSent] = useState(false);
   const [isEmailSubmission, setIsEmailSubmission] = useState(false);
   
+  // Compound names mapping: { smiles: name }
+  const [compoundNamesMap, setCompoundNamesMap] = useState({});
+  
   // User registration states
   const [userExists, setUserExists] = useState(false);
   const [showRegistrationForm, setShowRegistrationForm] = useState(false);
@@ -111,7 +114,9 @@ export default function Home() {
 
   useEffect(() => {
     if (results && results.classification_results) {
-      const newTableData = Object.entries(results.classification_results).map(([smiles, classification]) => {
+      const smilesArray = Object.keys(results.classification_results);
+      
+      const newTableData = Object.entries(results.classification_results).map(([smiles, classification], index) => {
         let AC50Display = 'N/A';
         let rawPurityData = {};
 
@@ -147,8 +152,12 @@ export default function Home() {
             : typeof value === 'number' ? value.toFixed(4) : '0.0000';
         });
 
+        // Get the compound name from the mapping using SMILES as key
+        const compoundName = compoundNamesMap[smiles] || "";
+
         return {
           smiles: smiles.startsWith("EMPTY_INPUT_") ? "(Empty Input)" : smiles,
+          name: compoundName,
           type: classification,
           AC50: AC50Display,
           _rawPurityData: rawPurityData,
@@ -204,7 +213,7 @@ export default function Home() {
       setChartData([]);
       setActivatorAC50Data([]);
     }
-  }, [results]);
+  }, [results, compoundNamesMap]);
 
   const readFileContent = useCallback((file) => {
     return new Promise((resolve, reject) => {
@@ -225,6 +234,7 @@ export default function Home() {
 
   const parseFileContent = useCallback((fileContent, isBinary, fileName) => {
     let smilesFromFile = [];
+    let namesFromFile = [];
     let localJsonSheet = [];
     try {
       const workbook = XLSX.read(fileContent, { type: isBinary ? 'binary' : 'string', cellNF: false, cellDates: false });
@@ -242,9 +252,15 @@ export default function Home() {
           startIndex = 1;
         }
 
-        smilesFromFile = localJsonSheet.slice(startIndex)
-          .map(row => (row && row[0]) ? String(row[0]).trim() : "")
-          .filter(s => s && s.length > 2 && !s.toLowerCase().includes("smiles") && !s.toLowerCase().includes("compound"));
+        localJsonSheet.slice(startIndex).forEach(row => {
+          const smiles = (row && row[0]) ? String(row[0]).trim() : "";
+          const name = (row && row[1]) ? String(row[1]).trim() : "";
+          
+          if (smiles && smiles.length > 2 && !smiles.toLowerCase().includes("smiles") && !smiles.toLowerCase().includes("compound")) {
+            smilesFromFile.push(smiles);
+            namesFromFile.push(name); // Empty string if no name provided
+          }
+        });
       }
     } catch (error) {
       console.error("Error processing file with XLSX:", error);
@@ -258,9 +274,16 @@ export default function Home() {
             firstRowFirstCell.length < 50) {
             startIndex = 1;
           }
-          smilesFromFile = rows.slice(startIndex)
-            .map(row => row.split(/[,;\t]/)[0] ? row.split(/[,;\t]/)[0].trim() : "")
-            .filter(s => s && s.length > 2 && !s.toLowerCase().includes("smiles") && !s.toLowerCase().includes("compound"));
+          rows.slice(startIndex).forEach(row => {
+            const cols = row.split(/[,;\t]/);
+            const smiles = cols[0] ? cols[0].trim() : "";
+            const name = cols[1] ? cols[1].trim() : "";
+            
+            if (smiles && smiles.length > 2 && !smiles.toLowerCase().includes("smiles") && !smiles.toLowerCase().includes("compound")) {
+              smilesFromFile.push(smiles);
+              namesFromFile.push(name);
+            }
+          });
         }
       } else {
         throw new Error("Could not parse file. Ensure SMILES are in the first column of a valid Excel (xlsx, xls) or CSV file.");
@@ -269,7 +292,7 @@ export default function Home() {
     if (smilesFromFile.length === 0 && localJsonSheet && localJsonSheet.length > 0) {
       console.warn("File parsed but no valid SMILES extracted. Check first column and header logic.");
     }
-    return smilesFromFile;
+    return { smiles: smilesFromFile, names: namesFromFile };
   }, []);
 
   const handleFileChange = (event) => {
@@ -326,13 +349,23 @@ export default function Home() {
   const handleSubmit = async () => {
     setIsLoading(true); setResults(null); setInputError(''); setEmailSent(false); setIsEmailSubmission(false);
     let smilesToProcess = [];
+    let namesMapping = {}; // Create mapping object
 
     if (selectedFile) {
       try {
         const fileData = await readFileContent(selectedFile);
-        smilesToProcess = parseFileContent(fileData.content, fileData.isBinary, selectedFile.name);
+        const parsed = parseFileContent(fileData.content, fileData.isBinary, selectedFile.name);
+        smilesToProcess = parsed.smiles;
+        
+        // Create mapping from SMILES to name
+        parsed.smiles.forEach((smiles, index) => {
+          if (parsed.names[index]) {
+            namesMapping[smiles] = parsed.names[index];
+          }
+        });
+        
         if (smilesToProcess.length === 0) {
-          setInputError("No valid SMILES found in file. Check format (SMILES in first column, optional header).");
+          setInputError("No valid SMILES found in file. Check format (SMILES in first column, optional name in second column).");
           setIsLoading(false); return;
         }
       } catch (error) {
@@ -340,8 +373,24 @@ export default function Home() {
         setIsLoading(false); return;
       }
     } else if (textareaValue.trim() !== "") {
-      smilesToProcess = textareaValue.split(/[\n,]+/).map(s => s.trim()).filter(s => s);
+      // Parse manual input: each line can be "SMILES,Name" or just "SMILES"
+      const lines = textareaValue.split(/\n/).filter(line => line.trim());
+      lines.forEach(line => {
+        const parts = line.split(',').map(p => p.trim());
+        const smiles = parts[0];
+        const name = parts[1] || ""; // Optional name
+        
+        if (smiles) {
+          smilesToProcess.push(smiles);
+          if (name) {
+            namesMapping[smiles] = name;
+          }
+        }
+      });
     }
+
+    // Store the mapping for later use
+    setCompoundNamesMap(namesMapping);
 
     if (smilesToProcess.length === 0) {
       setInputError("No SMILES input. Enter in textarea or upload file.");
@@ -456,6 +505,7 @@ export default function Home() {
     setUserEmail(''); setShowEmailPrompt(false); setEmailSent(false);
     setShowRegistrationForm(false); setUserName(''); setUserAffiliation('');
     setRegistrationError(''); setUserExists(false);
+    setCompoundNamesMap({});
     const fileInput = document.getElementById('fileUpload');
     if (fileInput) fileInput.value = null;
   };
@@ -480,7 +530,7 @@ export default function Home() {
       'n5HeteroRing', 'nT5HeteroRing', 'SRW5', 'SRW7', 'SRW9', 'WTPT-5'
     ];
     
-    const headers = ["Compound (SMILES)", "Modulator Type", "AC50 Range", ...descriptorHeaders];
+    const headers = ["Compound (SMILES)", "Name", "Modulator Type", "AC50 Range", ...descriptorHeaders];
     const csvRows = [
       headers.join(','),
       ...tableData.map(item => {
@@ -489,6 +539,7 @@ export default function Home() {
         );
         return [
           escapeCSVField(item.smiles),
+          escapeCSVField(item.name || ''),
           escapeCSVField(item.type),
           escapeCSVField(item.AC50),
           ...descriptorValues
@@ -616,12 +667,12 @@ export default function Home() {
             <div className="grid md:grid-cols-2 gap-6 mb-6">
               <div>
                 <label htmlFor="smilesInput" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Enter SMILES Strings
+                  Enter SMILES Strings (with optional names)
                 </label>
                 <textarea
                   id="smilesInput" rows={6}
                   className="w-full p-3 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-cyan-500 focus:border-cyan-500 bg-gray-50 dark:bg-gray-700 text-sm font-mono placeholder-gray-400 dark:placeholder-gray-500"
-                  placeholder={`CCC,CCO\nCNC(=O)C1=CN=CN1\nMax ${MAX_COMPOUNDS} compounds, separated by comma or newline.`}
+                  placeholder={`SMILES,Name (optional)\nCCC,Propane\nCCO,Ethanol\nCNC(=O)C1=CN=CN1\nMax ${MAX_COMPOUNDS} compounds. One per line.`}
                   value={textareaValue}
                   onChange={(e) => { setTextareaValue(e.target.value); setSelectedFile(null); setFileName(''); setInputError(''); setResults(null); }}
                   disabled={isLoading}
@@ -642,7 +693,7 @@ export default function Home() {
                       </label>
                       <p className="pl-1">or drag and drop</p>
                     </div>
-                    <p className="text-xs text-gray-500 dark:text-gray-500">CSV, XLSX, XLS up to 1MB. SMILES in first column.</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-500">CSV, XLSX, XLS up to 1MB. SMILES in column 1, optional name in column 2.</p>
                     {fileName && <p className="text-xs text-cyan-600 dark:text-cyan-400 mt-1">Selected: {fileName}</p>}
                   </div>
                 </div>
@@ -911,6 +962,7 @@ export default function Home() {
                           <tr>
                             <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Sl. No.</th>
                             <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Compound (SMILES)</th>
+                            <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Name</th>
                             <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Modulator Type</th>
                             <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">AC50 Range</th>
                             <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">nN</th>
@@ -948,6 +1000,7 @@ export default function Home() {
                             <tr key={item.smiles + index} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
                               <td className="px-4 py-3 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">{index + 1}</td>
                               <td className="px-4 py-3 whitespace-nowrap text-xs font-mono text-gray-700 dark:text-gray-300 break-all max-w-xs truncate" title={item.smiles}>{item.smiles}</td>
+                              <td className="px-4 py-3 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400" title={item.name}>{item.name || '-'}</td>
                               <td className="px-4 py-3 whitespace-nowrap text-xs">
                                 <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full
                               ${item.type === "Activator" ? "bg-green-100 dark:bg-green-700/30 text-green-800 dark:text-green-300" :
