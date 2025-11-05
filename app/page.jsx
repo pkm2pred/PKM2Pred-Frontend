@@ -10,8 +10,8 @@ import {
 
 // --- Configuration ---
 const MAX_COMPOUNDS = 20;
-// const API_BASE_URL = 'https://honest-tuna-striking.ngrok-free.app/api';
-const API_BASE_URL = 'http://127.0.0.1:5000/api';
+const API_BASE_URL = 'https://honest-tuna-striking.ngrok-free.app/api';
+// const API_BASE_URL = 'http://127.0.0.1:5000/api';
 const API_URL = `${API_BASE_URL}/predict`;
 const CHECK_USER_URL = `${API_BASE_URL}/check-user`;
 const REGISTER_USER_URL = `${API_BASE_URL}/register-user`;
