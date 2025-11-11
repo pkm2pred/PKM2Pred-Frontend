@@ -14,7 +14,6 @@ const API_BASE_URL = 'https://honest-tuna-striking.ngrok-free.app/api';
 // const API_BASE_URL = 'http://127.0.0.1:5000/api';
 const API_URL = `${API_BASE_URL}/predict`;
 const CHECK_USER_URL = `${API_BASE_URL}/check-user`;
-const REGISTER_USER_URL = `${API_BASE_URL}/register-user`;
 
 // --- Helper Components / Icons ---
 const IconSun = () => (
@@ -113,7 +112,88 @@ export default function Home() {
 
 
   useEffect(() => {
-    if (results && results.classification_results) {
+    if (results && results.predictions) {
+      // New backend format - predictions array
+      const newTableData = results.predictions.map((prediction, index) => {
+        let AC50Display = 'N/A';
+        let rawPurityData = {};
+        let classification = prediction.classification || 'unknown';
+        
+        // Map classification to match old format (inhibitor -> Activator, decoy -> Decoy)
+        // Note: Backend uses 'inhibitor' and 'decoy', frontend expects 'Activator', 'Inhibitor', 'Decoy'
+        let mappedType = classification.charAt(0).toUpperCase() + classification.slice(1); // Capitalize
+        
+        // Handle IC50 display for inhibitors
+        if (prediction.ic50 !== null && prediction.ic50 !== undefined) {
+          AC50Display = `IC50: ${prediction.ic50.toFixed(2)} nM (Class: ${prediction.class})`;
+          rawPurityData = {
+            median: prediction.ic50,
+            lower: prediction.ic50,
+            upper: prediction.ic50,
+          };
+        }
+
+        // Get descriptor values for this compound
+        const descriptors = prediction.descriptors || {};
+        
+        // Replace NaN with 0.0000 and format to 4 decimal places
+        const formattedDescriptors = {};
+        Object.keys(descriptors).forEach(key => {
+          const value = descriptors[key];
+          formattedDescriptors[key] = (value === null || value === undefined || isNaN(value)) 
+            ? '0.0000' 
+            : typeof value === 'number' ? value.toFixed(4) : '0.0000';
+        });
+
+        // Get the compound name from the prediction
+        const compoundName = prediction.name || "";
+
+        return {
+          smiles: prediction.smiles,
+          name: compoundName,
+          type: mappedType,
+          AC50: AC50Display,
+          _rawPurityData: rawPurityData,
+          descriptors: formattedDescriptors
+        };
+      });
+
+      // No need to sort as backend returns in correct order
+      setTableData(newTableData);
+
+      const counts = { Activator: 0, Inhibitor: 0, Decoy: 0, Error: 0 };
+      newTableData.forEach(item => {
+        if (counts[item.type] !== undefined) {
+          counts[item.type]++;
+        } else {
+          counts.Error++;
+        }
+      });
+
+      const newChartData = Object.keys(counts)
+        .filter(key => counts[key] > 0)
+        .map(key => ({ name: key, value: counts[key] }));
+      setChartData(newChartData);
+
+      const activatorSpecificData = newTableData
+        .filter(item =>
+          item.type === 'Inhibitor' && // Changed from 'Activator'
+          item._rawPurityData &&
+          typeof item._rawPurityData.median === 'number'
+        )
+        .map((item, index) => ({
+          name: `${index + 1}`,
+          fullSmiles: item.smiles,
+          range: [
+            parseFloat(item._rawPurityData.lower ? item._rawPurityData.lower.toFixed(2) : 0),
+            parseFloat(item._rawPurityData.upper ? item._rawPurityData.upper.toFixed(2) : 0)
+          ],
+          median: parseFloat(item._rawPurityData.median.toFixed(2)),
+        }));
+      setActivatorAC50Data(activatorSpecificData);
+
+    } else if (results && results.classification_results) {
+      // Old backend format - keep for backward compatibility
       const smilesArray = Object.keys(results.classification_results);
       
       const newTableData = Object.entries(results.classification_results).map(([smiles, classification], index) => {
@@ -327,25 +407,6 @@ export default function Home() {
     }
   };
 
-  const registerNewUser = async (email, name, affiliation) => {
-    try {
-      const res = await fetch(REGISTER_USER_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, name, affiliation }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        return { success: true };
-      } else {
-        return { success: false, error: data.error || 'Failed to register user.' };
-      }
-    } catch (error) {
-      console.error('Error registering user:', error);
-      return { success: false, error: 'Network error. Please try again.' };
-    }
-  };
-
   const handleSubmit = async () => {
     setIsLoading(true); setResults(null); setInputError(''); setEmailSent(false); setIsEmailSubmission(false);
     let smilesToProcess = [];
@@ -412,14 +473,16 @@ export default function Home() {
         return;
       }
       
-      // Check if user exists in database
-      const exists = await checkUserInDatabase(userEmail);
-      if (!exists) {
-        // User doesn't exist, show registration form
-        setShowRegistrationForm(true);
-        setInputError(`Email not found in our database. Please provide your name and affiliation to register.`);
-        setIsLoading(false);
-        return;
+      // Check if user exists in database (only if we don't already have registration info)
+      if (!userName || !userAffiliation) {
+        const exists = await checkUserInDatabase(userEmail);
+        if (!exists) {
+          // User doesn't exist, show registration form
+          setShowRegistrationForm(true);
+          setInputError(`Email not found in our database. Please provide your name and affiliation to register.`);
+          setIsLoading(false);
+          return;
+        }
       }
       
       // Set flag to indicate this is an email submission
@@ -431,10 +494,22 @@ export default function Home() {
 
     try {
       const payload = { 
-        compound: smilesToProcess, 
+        compound: smilesToProcess,
+        names: namesMapping,  // Include the names mapping
         percentage: Number(percentage),
-        email: (selectedFile && smilesToProcess.length > MAX_COMPOUNDS) ? userEmail : undefined
       };
+      
+      // For large batches, add email and user info
+      if (isLargeBatch && userEmail) {
+        payload.email = userEmail;
+        // Include name and affiliation if provided (for new user registration)
+        if (userName && userAffiliation) {
+          payload.name = userName;
+          payload.affiliation = userAffiliation;
+        }
+      }
+      
+      console.log('Sending payload:', payload);  // Debug log
       
       const res = await fetch(API_URL, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -443,25 +518,43 @@ export default function Home() {
       const data = await res.json();
       
       if (!res.ok) {
+        // Check if error is about missing user info
+        if (data.error && data.error.includes('Name and affiliation are required')) {
+          setShowRegistrationForm(true);
+          setInputError(data.error);
+          setIsLoading(false);
+          setIsEmailSubmission(false);
+          return;
+        }
         setResults({ error: data.error || `Server Error: ${res.status}` });
         setIsLoading(false);
         setIsEmailSubmission(false);
       } else {
-        // Check if email was sent for large batch
-        if (data.email_sent) {
-          // Update results to show completion
+        // Success! Hide registration form if it was shown
+        setShowRegistrationForm(false);
+        setRegistrationError('');
+        
+        // Check if email was sent for large batch (backend returns message for large batches)
+        if (data.message && data.email && data.compound_count) {
+          // Large batch - email will be sent
           setResults({ 
             email_sent: true, 
-            message: 'Processing completed successfully! Results will be sent to your email shortly.',
+            message: data.message || 'Processing completed successfully! Results will be sent to your email shortly.',
             completionMessage: 'Check your inbox for the detailed results CSV file.',
             compound_count: data.compound_count,
-            recipient_email: data.recipient_email,
+            recipient_email: data.email,
             isProcessing: false
           });
           setEmailSent(true);
           setIsLoading(false);
           setIsEmailSubmission(false);
+        } else if (data.predictions) {
+          // Small batch - results returned directly
+          setResults({ predictions: data.predictions });
+          setIsLoading(false);
+          setIsEmailSubmission(false);
         } else {
+          // Fallback for any other response format
           setResults(data);
           setIsLoading(false);
           setIsEmailSubmission(false);
@@ -482,21 +575,10 @@ export default function Home() {
     }
     
     setRegistrationError('');
-    setIsLoading(true);
     
-    // Register user
-    const result = await registerNewUser(userEmail, userName, userAffiliation);
-    if (result.success) {
-      // Registration successful, hide form and proceed with submission
-      setShowRegistrationForm(false);
-      setUserExists(true);
-      setInputError('');
-      // Automatically proceed with compound processing
-      handleSubmit();
-    } else {
-      setRegistrationError(result.error || 'Failed to register. Please try again.');
-      setIsLoading(false);
-    }
+    // Registration will be handled inline in the predict endpoint
+    // Just proceed with submission
+    handleSubmit();
   };
 
   const clearInputs = () => {
@@ -794,7 +876,7 @@ export default function Home() {
                     disabled={isLoading}
                     className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400 text-white font-semibold rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {isLoading ? 'Registering...' : 'Register & Continue'}
+                    {isLoading ? 'Registering and calculating...' : 'Register & Continue'}
                   </button>
                 </div>
               </motion.div>
